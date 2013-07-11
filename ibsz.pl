@@ -1,59 +1,52 @@
 #!/usr/bin/perl
-
-#    This script does bulk update changes to the IP address of your zone, by reading in a CSV file,
-#    then Publishing the Zones that were updated trough the DynECT API.
+#    This script does bulk imports of secondary zones.
 #    
-#    The format of the csv file is "Zone Name", "Old IPv4 Address", "New IPv4 Address",
+#	 The zone names of each new secondary zone should be specified in a text file,
+#    with one per line.
 #
-#    The credentials are read in from a configuration file in 
-#    the same directory. 
-#    
-#    The file is named credentials.cfg in the format:
-#    
+#    DynECT login credentials, a TCIG key, and one or more masters should be specified
+#    in a config.ini file.
+#
 #    [Dynect]
 #    user: user_name
 #    customer: customer_name
 #    password: password
 #    
-#    Usage: %python ipb.py [-F]
+#    Usage: %perl ibsz.pl [-F]
 #
 #    Options
 #        -h, --help              Show this help message and exit
-#        -F, FILE, --File=FILE   Add CSV file to search through for bulk IP address change.
+#        -F, FILE, --File=FILE   Specify the text file containing a list of zone names
 
 use warnings;
 use strict;
-use Data::Dumper;
 use Config::Simple;
 use Getopt::Long;
 use LWP::UserAgent;
 use JSON;
-use File::Slurp;
-use File::Spec;
-use Text::CSV_XS;
 
 my $opt_file;
 my $opt_help;
 
 GetOptions(
-  'file=s'	=>	\$opt_file,
+	'file=s'	=>	\$opt_file,
 	'help'		=>	\$opt_help
 );
 
-#This help message needs updating
+#Prints help message
 if ($opt_help) {
-	my $hmsg = <<'HELP';
-	\tThis script imports and publishes zone files to DynECT\n
-	\tAPI integration requires paramaters stored in config.cfg\n\n
-	\tOptions:\n
-	\t\t-file/-m \<FILE\>\tThe hostmaster mailbox associated with the zone\n\t\t\t\t\tOverrides value defined in config.cfg\n
-	\t\t-xml/-x <FILE>\t\tREQUIRED: XML File to be interpreted\n
-	\t\t-zone/-z \"ZONE\"\t\tREQUIRED: Zone name for matching XML file\n
-	\t\t-help/-h\t\tPrints this help information\n
-HELP
+	print "\tThis script does bulk imports of secondary zones.\n\n";
+	print "\tThe zone names of each new secondary zone should be specified\n";
+	print "\tin a text file, with one per line.\n\n";
+	print "\tDynECT login credentials, a TCIG key, and one or more masters\n";
+	print "\tshould be specified in a config.ini file.\n\n";
+	print "\tOptions:\n";
+	print "\t\t--file/-f <FILE>\tREQUIRED: Text file\n";
+	print "\t\t-help/-h\t\tPrints this help information\n";
 	exit;
 }
 
+#Exit if file is not specified
 unless ($opt_file) {
 	print "-f or --file option required\n";
 	exit;
@@ -87,7 +80,7 @@ my $apitsig = $configopt{'tsig'} or do {
 	exit;
 };
 
-my @apimaster = $configopt{'ip'} or do { #Debugging: Syntax for array MAY not work
+my @apimaster = $configopt{'ip'} or do {
 	print "One or more IP address required in config.cfg\n";
 	exit;
 };
@@ -113,17 +106,15 @@ if ($api_decode->{'status'} eq 'success') {
 print "Login successful.\n";
 }
 
-#Open CSV file
-open my $csvfile, '<', $opt_file
-	or die "Unable to open XML File $opt_file.  Stopped";
+#Open file
+open my $file, '<', $opt_file
+	or die "Unable to open file $opt_file.  Stopped";
 
-#Create CSV file parser
-my $csv = Text::CSV_XS->new ({ binary => 1 });
-
-#Parse CSV file, assign content to variables
-while (my $row = $csv->getline ($csvfile)) {
-	my $zone_name = $$row[0];
-
+#Parse file, assign content to variables
+while (<$file>) {
+	my $zone_name = $_;
+	chomp $zone_name;
+	
 	#Create new secondary zone
 	my $zonerecord_uri = "https://api2.dynect.net/REST/Secondary/$zone_name/";
 	my $api_request = HTTP::Request->new('POST',$zonerecord_uri);
