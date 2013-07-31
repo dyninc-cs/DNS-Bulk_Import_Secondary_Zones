@@ -1,22 +1,27 @@
 #!/usr/bin/perl
-#    This script does bulk imports of secondary zones.
+#    This script does a bulk import of secondary zones.
 #    
-#	 The zone names of each new secondary zone should be specified in a text file,
-#    with one per line.
+#	 The zone name of each new secondary zone needs to be specified
+#    in a text file containing one zone per line.
 #
-#    DynECT login credentials, a TCIG key, and one or more masters should be specified
-#    in a config.ini file.
+#    A configuration file called config.cfg containing DynECT
+#	 login credentials, one or more masters, and optionally a
+#    TSIG key should exist in the same directory.
+#    The file config.cfg takes the format:
 #
 #    [Dynect]
-#    user: user_name
-#    customer: customer_name
-#    password: password
-#    
-#    Usage: %perl ibsz.pl [-F]
+#    cn: [customer name]
+#    un: [username]
+#    pw: [password]
+#    ip: [one or more comma separated A or AAAA records]
+#    tsig: [TSIG key]
+#
+#    Usage: %perl ibsz.pl -F FILE [options]
 #
 #    Options
+#        -f, --file FILE         Specify the text file containing a list of zone names
+#        -t, --tsig              Indicate whether TSIG key is included in config.cfg
 #        -h, --help              Show this help message and exit
-#        -F, FILE, --File=FILE   Specify the text file containing a list of zone names
 
 use warnings;
 use strict;
@@ -27,28 +32,39 @@ use JSON;
 
 my $opt_file;
 my $opt_help;
+my $opt_tsig;
 
+#Assign the values of each option to variables
 GetOptions(
 	'file=s'	=>	\$opt_file,
+	'tsig'		=>  \$opt_tsig,
 	'help'		=>	\$opt_help
 );
 
-#Prints help message
+#Print help message and exit
 if ($opt_help) {
-	print "\tThis script does bulk imports of secondary zones.\n\n";
-	print "\tThe zone names of each new secondary zone should be specified\n";
-	print "\tin a text file, with one per line.\n\n";
-	print "\tDynECT login credentials, a TCIG key, and one or more masters\n";
-	print "\tshould be specified in a config.ini file.\n\n";
-	print "\tOptions:\n";
-	print "\t\t--file/-f <FILE>\tREQUIRED: Text file\n";
-	print "\t\t-help/-h\t\tPrints this help information\n";
+	print "This script does a bulk import of secondary zones. The zone name of\n";
+	print "each secondary zone needs to be specified in a text file containing one\n";
+	print "zone name per line.\n\n";
+	print "A configuration file called config.cfg containing DynECT login\n";
+	print "credentials, one or more masters, and optionally a TSIG key should\n";
+	print "exist in the same directory. The file config.cfg takes the format:\n";
+	print "[DynECT]\n";
+	print "cn: [customer name]\n";
+	print "un: [username]\n";
+	print "pw: [password]\n";
+	print "ip: [one or more comma separated A or AAAA records]\n";
+	print "tsig: [TSIG key]\n\n";
+	print "Options:\n";
+	print "-f, --file FILE\t\tREQUIRED: Specify text file\n";
+	print "-t, --tsig\t\tIndicate whether TSIG key is included in the cfg file\n";
+	print "-h, --help\t\tPrints this help message and exits\n";
 	exit;
 }
 
 #Exit if file is not specified
 unless ($opt_file) {
-	print "-f or --file option required\n";
+	print "-f or --file option and valid file required\n";
 	exit;
 }
 
@@ -75,14 +91,16 @@ my $apipw = $configopt{'pw'} or do {
 	exit;
 };
 
-my $apitsig = $configopt{'tsig'} or do {
-	print "TSIG Key required in config.cfg\n";
-	exit;
-};
-
 my @apimaster = $configopt{'ip'} or do {
 	print "One or more IP address required in config.cfg\n";
 	exit;
+};
+
+my $apitsig = $configopt{'tsig'} or do {
+	if ($opt_tsig) {
+		print "TSIG Key required in config.cfg when -t or --tsig option specified\n";
+		exit;
+	}
 };
 
 #API login
@@ -92,40 +110,43 @@ my %api_param = (
 	'user_name' => $apiun,
 	'password' => $apipw,
 	);
-
 my $api_request = HTTP::Request->new('POST',$session_uri);
 $api_request->header ( 'Content-Type' => 'application/json' );
 $api_request->content( to_json( \%api_param ) );
-
 my $api_lwp = LWP::UserAgent->new;
 my $api_result = $api_lwp->request( $api_request );
-
 my $api_decode = decode_json ( $api_result->content ) ;
 my $api_key = $api_decode->{'data'}->{'token'};
-if ($api_decode->{'status'} eq 'success') {
-print "Login successful.\n";
-}
 
-#Open file
+#Open file containing zone names
 open my $file, '<', $opt_file
 	or die "Unable to open file $opt_file.  Stopped";
 
-#Parse file, assign content to variables
+#Parse file for secondary zone names and post them to DynECT
 while (<$file>) {
 	my $zone_name = $_;
 	chomp $zone_name;
-	
-	#Create new secondary zone
+	#Create new secondary zone. Include TSIG key if one is specified
 	my $zonerecord_uri = "https://api2.dynect.net/REST/Secondary/$zone_name/";
 	my $api_request = HTTP::Request->new('POST',$zonerecord_uri);
 	$api_request->header( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
-	my %api_param = ( 'masters' => @apimaster, 'tsig_key_name' => $apitsig );
-	$api_request->content( to_json( \%api_param ) );
-	my $api_result = $api_lwp->request($api_request);
-	my $api_decode = decode_json( $api_result->content);
-	$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
+	if ($apitsig) {
+		my %api_param = ( 'masters' => @apimaster, 'tsig_key_name' => $configopt{'tsig'} );
+		$api_request->content( to_json( \%api_param ) );
+		my $api_result = $api_lwp->request($api_request);
+		my $api_decode = decode_json( $api_result->content);
+		$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
+	}
+	else {
+		my %api_param = ( 'masters' => @apimaster );
+		$api_request->content( to_json( \%api_param ) );
+		my $api_result = $api_lwp->request($api_request);
+		my $api_decode = decode_json( $api_result->content);
+		$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
+	}
 }
 
+#Fail gracefully
 sub api_fail {
 	my ($api_keyref, $api_jsonref) = @_;
 	#set up variable that can be used in either logic branch
