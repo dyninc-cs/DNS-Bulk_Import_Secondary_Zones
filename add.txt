@@ -1,0 +1,3 @@
+test.com
+example.com
+yourdomain.com
