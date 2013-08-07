@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 #    This script does a bulk import of secondary zones.
 #    
 #	 The zone name of each new secondary zone needs to be specified
@@ -27,8 +27,12 @@ use warnings;
 use strict;
 use Config::Simple;
 use Getopt::Long;
-use LWP::UserAgent;
-use JSON;
+use Data::Dumper;
+
+#Import DynECT handler
+use FindBin;
+use lib "$FindBin::Bin/DynECT";  # use the parent directory
+require DynECT::DNS_REST;
 
 my $opt_file;
 my $opt_help;
@@ -43,18 +47,7 @@ GetOptions(
 
 #Print help message and exit
 if ($opt_help) {
-	print "This script does a bulk import of secondary zones. The zone name of\n";
-	print "each secondary zone needs to be specified in a text file containing one\n";
-	print "zone name per line.\n\n";
-	print "A configuration file called config.cfg containing DynECT login\n";
-	print "credentials, one or more masters, and optionally a TSIG key should\n";
-	print "exist in the same directory. The file config.cfg takes the format:\n";
-	print "[DynECT]\n";
-	print "cn: [customer name]\n";
-	print "un: [username]\n";
-	print "pw: [password]\n";
-	print "ip: [one or more comma separated A or AAAA records]\n";
-	print "tsig: [TSIG key]\n\n";
+	print "Additional details in README.md\n";
 	print "Options:\n";
 	print "-f, --file FILE\t\tREQUIRED: Specify text file\n";
 	print "-t, --tsig\t\tIndicate whether TSIG key is included in the cfg file\n";
@@ -76,6 +69,12 @@ $cfg->read('config.cfg') or die $cfg->error();
 
 #dump config variables into hash for later use
 my %configopt = $cfg->vars();
+
+if ( $configopt{'cn'} eq 'CUSTOMERNAME' ) {
+	print "Please modify config.cfg with account details\n";
+	exit;
+}
+
 my $apicn = $configopt{'cn'} or do {
 	print "Customer Name required in config.cfg for API login\n";
 	exit;
@@ -103,83 +102,53 @@ my $apitsig = $configopt{'tsig'} or do {
 	}
 };
 
+#Instantiate dynect library instance
+my $dynect = DynECT::DNS_REST->new();
+
 #API login
-my $session_uri = 'https://api2.dynect.net/REST/Session';
-my %api_param = ( 
-	'customer_name' => $apicn,
-	'user_name' => $apiun,
-	'password' => $apipw,
-	);
-my $api_request = HTTP::Request->new('POST',$session_uri);
-$api_request->header ( 'Content-Type' => 'application/json' );
-$api_request->content( to_json( \%api_param ) );
-my $api_lwp = LWP::UserAgent->new;
-my $api_result = $api_lwp->request( $api_request );
-my $api_decode = decode_json ( $api_result->content ) ;
-my $api_key = $api_decode->{'data'}->{'token'};
+$dynect->login( $apicn, $apiun, $apipw )
+	or die $dynect->message;
 
 #Open file containing zone names
 open my $file, '<', $opt_file
 	or die "Unable to open file $opt_file.  Stopped";
 
+#array for storing zone names
+my @zones;
 #Parse file for secondary zone names and post them to DynECT
 while (<$file>) {
 	my $zone_name = $_;
+	#next if blankline
+	next if $zone_name =~ /^\s*$/;
 	chomp $zone_name;
+	push ( @zones, $zone_name );
 	#Create new secondary zone. Include TSIG key if one is specified
-	my $zonerecord_uri = "https://api2.dynect.net/REST/Secondary/$zone_name/";
-	my $api_request = HTTP::Request->new('POST',$zonerecord_uri);
-	$api_request->header( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
-	if ($apitsig) {
-		my %api_param = ( 'masters' => @apimaster, 'tsig_key_name' => $configopt{'tsig'} );
-		$api_request->content( to_json( \%api_param ) );
-		my $api_result = $api_lwp->request($api_request);
-		my $api_decode = decode_json( $api_result->content);
-		$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
-	}
-	else {
-		my %api_param = ( 'masters' => @apimaster );
-		$api_request->content( to_json( \%api_param ) );
-		my $api_result = $api_lwp->request($api_request);
-		my $api_decode = decode_json( $api_result->content);
-		$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
+	my $zonerecord_uri = "/REST/Secondary/$zone_name/";
+
+	my %api_param = ( 'masters' => @apimaster );
+	$api_param{ 'tsig_key_name' } = $configopt{'tsig'} if ($apitsig);
+	$dynect->request( $zonerecord_uri, 'POST', \%api_param ) or die $dynect->message;
+}
+
+#Array to track 20 job slots
+my @count = qw( -1 -1 );# -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 );
+my @zone_name;
+
+while ( @zones ) {
+	for my $i (0 .. $#count) {
+		print "$i, $count[$i]\n";
+		#if -2 wait another loop as buffer
+		if ( $count[$i] == -1 ) {
+			my %api_param = ( activate => 1 );
+			$zone_name[$i] = shift @zones;
+			$dynect->request( "/REST/Secondary/$zone_name[$i]/", 'PUT', \%api_param ) or die $dynect->message;
+		}
+		elsif ( $count[$i] > -1 ) { 
+			$dynect->request ( "/REST/Secondary/$zone_name[$i]/", 'GET') or die $dynect->message;
+			print Dumper $dynect->result;
+		}
+		$count[$i]++;
+		sleep 1;
 	}
 }
 
-#Fail gracefully
-sub api_fail {
-	my ($api_keyref, $api_jsonref) = @_;
-	#set up variable that can be used in either logic branch
-	my $api_request;
-	my $api_result;
-	my $api_decode;
-	my $api_lwp = LWP::UserAgent->new;
-	my $count = 0;
-	#loop until the job id comes back as success or program dies
-	while ( $api_jsonref->{'status'} ne 'success' ) {
-		if ($api_jsonref->{'status'} ne 'incomplete') {
-			foreach my $msgref ( @{$api_jsonref->{'msgs'}} ) {
-				print "API Error:\n";
-				print "\tInfo: $msgref->{'INFO'}\n" if $msgref->{'INFO'};
-				print "\tLevel: $msgref->{'LVL'}\n" if $msgref->{'LVL'};
-				print "\tError Code: $msgref->{'ERR_CD'}\n" if $msgref->{'ERR_CD'};
-				print "\tSource: $msgref->{'SOURCE'}\n" if $msgref->{'SOURCE'};
-			};
-			#api logout or fail
-			$api_request = HTTP::Request->new('DELETE','https://api2.dynect.net/REST/Session');
-			$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $$api_keyref );
-			$api_result = $api_lwp->request( $api_request );
-			$api_decode = decode_json ( $api_result->content);
-			exit;
-		}
-		else {
-			sleep(5);
-			my $job_uri = "https://api2.dynect.net/REST/Job/$api_jsonref->{'job_id'}/";
-			$api_request = HTTP::Request->new('GET',$job_uri);
-			$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $$api_keyref );
-			$api_result = $api_lwp->request( $api_request );
-			$api_jsonref = decode_json( $api_result->content );
-		}
-	}
-	$api_jsonref;
-}
