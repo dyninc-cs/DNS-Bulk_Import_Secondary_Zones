@@ -48,10 +48,10 @@ ________________________________________________________________________________
     pw: [password]
     ip: [one or more comma separated A or AAAA records]
     tsig: [TSIG key]
+	contact: [Contact Name]
 
     Usage: %perl ibsz.pl -F FILE [options]
 
     Options
         -f, --file FILE         Specify the text file containing a list of zone names
-        -t, --tsig              Indicate whether TSIG key is included in config.cfg
         -h, --help              Show this help message and exit
