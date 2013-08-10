@@ -27,11 +27,10 @@ use warnings;
 use strict;
 use Config::Simple;
 use Getopt::Long;
-use Data::Dumper;
 
 #Import DynECT handler
 use FindBin;
-use lib "$FindBin::Bin/DynECT";  # use the parent directory
+use lib $FindBin::Bin;  # use the parent directory
 require DynECT::DNS_REST;
 
 my $opt_file;
@@ -95,12 +94,12 @@ my @apimaster = $configopt{'ip'} or do {
 	exit;
 };
 
-my $apitsig = $configopt{'tsig'} or do {
-	if ($opt_tsig) {
-		print "TSIG Key required in config.cfg when -t or --tsig option specified\n";
-		exit;
-	}
-};
+if ( defined $configopt{'tsig'} ) {
+	delete $configopt{'tsig'} if ($configopt{'tsig'} eq 'TSIGKEYNAME');
+}
+if ( defined $configopt{'contact'} ) {
+	delete $configopt{'contact'} if ($configopt{'contact'} eq 'CONTACT_NICK');
+}
 
 #Instantiate dynect library instance
 my $dynect = DynECT::DNS_REST->new();
@@ -126,29 +125,53 @@ while (<$file>) {
 	my $zonerecord_uri = "/REST/Secondary/$zone_name/";
 
 	my %api_param = ( 'masters' => @apimaster );
-	$api_param{ 'tsig_key_name' } = $configopt{'tsig'} if ($apitsig);
-	$dynect->request( $zonerecord_uri, 'POST', \%api_param ) or die $dynect->message;
+	$api_param{ 'tsig_key_name' } = $configopt{'tsig'} if ($configopt{'tsig'});
+	$api_param{ 'contact_nickname' } = $configopt{'contact'} if ($configopt{'contact'});
+	unless( $dynect->request( $zonerecord_uri, 'POST', \%api_param ) ) {
+		die $dynect->message unless ( $dynect->message =~ /You already have this zone/);
+		print "$zone_name : Already exists\n";
+	}
+	else { 
+		print "$zone_name : Created\n";
+	}
 }
 
 #Array to track 20 job slots
-my @count = qw( -1 -1 );# -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 );
+my @count = qw( -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 );
 my @zone_name;
 
-while ( @zones ) {
+my $jobs = 0;
+#while jobs are processing or zones still left
+while ( $jobs || @zones) { 
 	for my $i (0 .. $#count) {
-		print "$i, $count[$i]\n";
-		#if -2 wait another loop as buffer
+		#if open slots
 		if ( $count[$i] == -1 ) {
+			#skips to next if there are no zones left
+			next unless @zones;
 			my %api_param = ( activate => 1 );
 			$zone_name[$i] = shift @zones;
 			$dynect->request( "/REST/Secondary/$zone_name[$i]/", 'PUT', \%api_param ) or die $dynect->message;
+			$jobs++;
+			$count[$i]++;
 		}
 		elsif ( $count[$i] > -1 ) { 
 			$dynect->request ( "/REST/Secondary/$zone_name[$i]/", 'GET') or die $dynect->message;
-			print Dumper $dynect->result;
+			if ( $dynect->result->{'data'}{'active'} eq 'L' ) {
+				$count[$i]++;
+				print "$zone_name[$i] : Still working\n" if ( ( $count[$i] % 5 ) == 0 );
+			}
+			elsif ( $dynect->result->{'data'}{'active'} eq 'Y' ) {
+				print "$zone_name[$i] : Actived\n";
+				$count[$i] = -1;
+				$jobs--;
+			}
+			else {
+				print "$zone_name[$i] : Failed Activation\n";
+				$count[$i] = -1;
+				$jobs--;
+			}
 		}
-		$count[$i]++;
 		sleep 1;
 	}
-}
+} 
 
